@@ -7,35 +7,10 @@ from select_plus.serializers import (
     CSVInputSerialization,
     CSVOutputSerialization,
 )
-
-import nltk
-
-from nltk.sentiment.vader import SentimentIntensityAnalyzer
-
-from nltk.corpus import stopwords
-
-from nltk.tokenize import word_tokenize
-
-from nltk.stem import WordNetLemmatizer
-
-# nltk.download("all")
-"""
-import ssl
-
-try:
-    _create_unverified_https_context = ssl._create_unverified_context
-except AttributeError:
-    pass
-else:
-    ssl._create_default_https_context = _create_unverified_https_context
-
-nltk.download("all")
-"""
+import wordcloud
 
 bucket = "fdotest"
 key = "hayley old-export.csv"
-# initialize NLTK sentiment analyzer
-analyzer = SentimentIntensityAnalyzer()
 
 
 # function to return a dataframe with the s3select contents
@@ -81,29 +56,51 @@ def query(ssp, condition=""):
     return payload_df
 
 
-def preprocess_text(text):
-    # Tokenize the text
-    tokens = word_tokenize(text.lower())
+def extract_words_from_df(words_df):
+    # pull out rows that aren't words
+    words_df = words_df[words_df["iMessage"].notnull()]
 
-    # Remove stop words
-    filtered_tokens = [
-        token for token in tokens if token not in stopwords.words("english")
+    # remove canned responses
+    words_df = words_df[
+        ~words_df["iMessage"].str.match("Sorry, I can't talk right now.")
     ]
 
-    # Lemmatize the tokens
-    lemmatizer = WordNetLemmatizer()
-    lemmatized_tokens = [lemmatizer.lemmatize(token) for token in filtered_tokens]
+    # remove rows that are just missed calls
+    words_df = words_df.loc[~words_df.iMessage.str.contains("MessageBank")]
 
-    # Join the tokens back into a string
-    processed_text = " ".join(lemmatized_tokens)
+    # remove punctuation
+    words_df["iMessage"] = words_df["iMessage"].str.replace("[^\w\s]+", "", regex=True)
 
-    return processed_text
+    # replace carriage returns
+    # words_df["iMessage"] = words_df["iMessage"].str.replace("\\n", "\n")
+    words_df["iMessage"] = words_df["iMessage"].str.replace("\n", " ")
+    words_df["iMessage"] = words_df["iMessage"].str.lower()
 
+    # pull the words out of the df
+    words_string = " ".join(words_df.iMessage).split(" ")
 
-def get_sentiment(text):
-    scores = analyzer.polarity_scores(text)
-    sentiment = 1 if scores["pos"] > 0 else 0
-    return sentiment
+    # clean out individual words that i don't want
+    min_word_length = 4
+    words_string = [word for word in words_string if not word.isdigit()]
+    words_string = [word for word in words_string if len(word) >= min_word_length]
+
+    # deal with plurals
+    words_string = [
+        word for word in words_string if not word[-1:] == "s" and word[-2:] != "ss"
+    ]
+
+    # get rid of common words
+    STOPWORDS = set(map(str.strip, open("scratch/stopwords.txt").readlines()))
+    words_string = [word for word in words_string if word not in STOPWORDS]
+
+    # get the count for each word
+    word_count, words = wordcloud.process_tokens(words_string)
+
+    # load it back in to a df so that I can do stats stuff with each word
+    cloud_df = pd.DataFrame.from_dict(word_count, orient="index")
+    cloud_df.columns = ["count"]
+    cloud_df = cloud_df.sort_values(by="count", ascending=False)
+    return cloud_df
 
 
 if __name__ == "__main__":
@@ -111,8 +108,6 @@ if __name__ == "__main__":
     # q = query(ssp, " where received = 'Yes'")
     qa = query(ssp)
     qa = qa.query("iMessage.notna()", engine="python")
+    cloud = extract_words_from_df(qa)
 
-    qa["assessed_text"] = qa["iMessage"].apply(preprocess_text)
-    qa["sentiment"] = qa["iMessage"].apply(get_sentiment)
-
-    print("a")
+    # cloud_df = pd.DataFrame.from_dict(word_count, orient="index")
